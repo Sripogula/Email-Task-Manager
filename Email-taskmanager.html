@@ -15,81 +15,20 @@ import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, doc, Ti
 // This script tag is typically in the HTML head, but including it here for completeness
 // <script src="https://cdn.tailwindcss.com"></script>
 
-function App() {
-    // Firebase related states
-    const [db, setDb] = useState(null);
-    const [auth, setAuth] = useState(null);
-    const [userId, setUserId] = useState(null);
-    const [isAuthReady, setIsAuthReady] = useState(false); // To ensure auth is ready before Firestore ops
-
-    // Authentication form states
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [isLoginMode, setIsLoginMode] = useState(true); // True for login, false for signup
-    const [authError, setAuthError] = useState(''); // Specific error for auth operations
-
+// Home Component - Contains the main application logic for authenticated users
+function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage, setError, handleLogout }) { // Added handleLogout prop
     // Application states
     const [tasks, setTasks] = useState([]);
-    const [loading, setLoading] = useState(true); // General loading state for initial app load
-    const [actionLoading, setActionLoading] = useState(false); // Specific loading for actions (add, update, auth)
-    const [error, setError] = useState(null);
     const [newTaskSubject, setNewTaskSubject] = useState('');
     const [newTaskSender, setNewTaskSender] = useState('');
     const [rawEmailContent, setRawEmailContent] = useState(''); // New state for raw email input
     const [isProcessingEmail, setIsProcessingEmail] = useState(false); // Loading for LLM processing
 
     const [activeTab, setActiveTab] = useState('new'); // For filtering tasks
-    const [message, setMessage] = useState(''); // For user feedback messages
-    const messageTimeoutRef = useRef(null); // Ref for message timeout
-
-    // Global variables from the environment (Canvas specific)
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-    // Initialize Firebase and handle authentication
-    useEffect(() => {
-        try {
-            const app = initializeApp(firebaseConfig);
-            const firestore = getFirestore(app);
-            const authentication = getAuth(app);
-
-            setDb(firestore);
-            setAuth(authentication);
-
-            // Listen for auth state changes
-            const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
-                if (user) {
-                    setUserId(user.uid);
-                    setAuthError(''); // Clear auth error on successful login
-                } else {
-                    setUserId(null); // Clear userId if logged out
-                    // Attempt to sign in anonymously if no user is logged in and an initial token is provided
-                    try {
-                        if (initialAuthToken) {
-                            await signInWithCustomToken(authentication, initialAuthToken);
-                        } else {
-                            // If no initial token and no logged-in user, allow user to sign in/up
-                        }
-                    } catch (err) {
-                        console.error("Firebase Initial Auth Error:", err);
-                    }
-                }
-                setIsAuthReady(true); // Mark auth as ready regardless of login status
-                setLoading(false); // Stop general loading after auth check
-            });
-
-            return () => unsubscribeAuth(); // Cleanup auth listener
-        } catch (err) {
-            console.error("Firebase Initialization Error:", err);
-            setError("Failed to initialize Firebase. Check console for details.");
-            setLoading(false);
-        }
-    }, [initialAuthToken, firebaseConfig]);
 
     // Fetch tasks when Firebase is ready and userId is available
     useEffect(() => {
-        if (!db || !userId || !isAuthReady) {
+        if (!db || !userId) {
             setTasks([]); // Clear tasks if not authenticated
             return;
         }
@@ -123,7 +62,7 @@ function App() {
         });
 
         return () => unsubscribe(); // Cleanup snapshot listener
-    }, [db, userId, isAuthReady, appId]);
+    }, [db, userId, appId, setActionLoading, setError]);
 
     // Timer update effect
     useEffect(() => {
@@ -151,82 +90,6 @@ function App() {
         return () => clearInterval(timerInterval); // Clean up interval on component unmount
     }, [tasks]); // Re-run if tasks change to ensure new timers are tracked
 
-    // Function to display temporary messages
-    const showMessage = (msg) => {
-        setMessage(msg);
-        if (messageTimeoutRef.current) {
-            clearTimeout(messageTimeoutRef.current);
-        }
-        messageTimeoutRef.current = setTimeout(() => {
-            setMessage('');
-        }, 3000); // Message disappears after 3 seconds
-    };
-
-    // Handle user login or signup
-    const handleAuth = async (e) => {
-        e.preventDefault();
-        setAuthError('');
-        setActionLoading(true); // Set action loading for auth
-
-        if (!email || !password) {
-            setAuthError("Email and password cannot be empty.");
-            setActionLoading(false);
-            return;
-        }
-
-        try {
-            if (isLoginMode) {
-                await signInWithEmailAndPassword(auth, email, password);
-                showMessage("Logged in successfully!");
-            } else {
-                await createUserWithEmailAndPassword(auth, email, password);
-                showMessage("Account created and logged in successfully!");
-            }
-            setEmail('');
-            setPassword('');
-        } catch (err) {
-            console.error("Authentication Error:", err);
-            let errorMessage = "An unexpected error occurred.";
-            if (err.code) {
-                switch (err.code) {
-                    case 'auth/email-already-in-use':
-                        errorMessage = 'This email is already in use. Try logging in.';
-                        break;
-                    case 'auth/invalid-email':
-                        errorMessage = 'Invalid email address.';
-                        break;
-                    case 'auth/weak-password':
-                        errorMessage = 'Password should be at least 6 characters.';
-                        break;
-                    case 'auth/user-not-found':
-                    case 'auth/wrong-password':
-                        errorMessage = 'Invalid email or password.';
-                        break;
-                    default:
-                        errorMessage = `Authentication failed: ${err.message}`;
-                }
-            }
-            setAuthError(errorMessage);
-        } finally {
-            setActionLoading(false); // Clear action loading after auth attempt
-        }
-    };
-
-    // Handle user logout
-    const handleLogout = async () => {
-        if (!auth) return;
-        setActionLoading(true); // Set action loading for logout
-        try {
-            await signOut(auth);
-            showMessage("Logged out successfully!");
-            setTasks([]); // Clear tasks on logout
-        } catch (err) {
-            console.error("Logout Error:", err);
-            setError("Failed to log out.");
-        } finally {
-            setActionLoading(false); // Clear action loading after logout
-        }
-    };
 
     // Add a new task (manual input)
     const handleAddTask = async (e) => {
@@ -427,6 +290,383 @@ function App() {
         }
     };
 
+    return (
+        <>
+            {/* Home Header - Now includes User ID and Logout */}
+            <header className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white p-6 rounded-t-xl shadow-lg">
+                <h1 className="text-3xl sm:text-4xl font-extrabold text-center mb-2 tracking-wide">Your Email Dashboard</h1>
+                <p className="text-center text-indigo-200 text-sm sm:text-base">Manage your email tasks efficiently and intelligently</p>
+                {userId && (
+                    <div className="flex flex-col sm:flex-row items-center justify-center text-sm mt-4 text-indigo-100">
+                        <span className="mb-2 sm:mb-0 sm:mr-4 bg-indigo-800 px-3 py-1 rounded-full text-xs font-mono shadow-inner">
+                            User ID: {userId}
+                        </span>
+                        <button
+                            onClick={handleLogout} // Use the passed handleLogout prop
+                            className="bg-indigo-800 hover:bg-indigo-900 text-white text-xs px-4 py-2 rounded-full transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                            disabled={actionLoading}
+                        >
+                            {actionLoading ? 'Logging Out...' : 'Log Out'}
+                        </button>
+                    </div>
+                )}
+            </header>
+
+            {/* Process New Email Section */}
+            <section className="p-6 border-b border-gray-200 bg-gray-50">
+                <h2 className="text-2xl font-bold mb-4 text-indigo-800">Automate Task Creation</h2>
+                <p className="text-gray-600 mb-4">Paste raw email content below to automatically extract details and categorize the task.</p>
+                <form onSubmit={processEmailContent} className="space-y-4">
+                    <div>
+                        <label htmlFor="rawEmail" className="block text-sm font-semibold text-gray-700 mb-1">Raw Email Content</label>
+                        <textarea
+                            id="rawEmail"
+                            value={rawEmailContent}
+                            onChange={(e) => setRawEmailContent(e.target.value)}
+                            placeholder="Paste the full email content (subject, sender, body) here. The app will automatically categorize it."
+                            rows="6"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm transition duration-200 ease-in-out text-gray-800 resize-y"
+                            required
+                        ></textarea>
+                    </div>
+                    <button
+                        type="submit"
+                        className="w-full bg-gradient-to-r from-blue-600 to-cyan-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-blue-700 hover:to-cyan-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
+                        disabled={isProcessingEmail}
+                    >
+                        {isProcessingEmail ? (
+                            <>
+                                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                Processing Email...
+                            </>
+                        ) : (
+                            'Process Email & Add Task'
+                        )}
+                    </button>
+                </form>
+                <div className="text-center text-sm text-gray-500 mt-4">
+                    Or, use the manual option below if needed.
+                </div>
+            </section>
+
+            {/* Add New Task Form (Manual Input - now secondary) */}
+            <section className="p-6 border-b border-gray-200 bg-gray-50">
+                <h2 className="text-2xl font-bold mb-4 text-indigo-800">Manually Add Email Task</h2>
+                <p className="text-gray-600 mb-4">Enter details for a new email task if automatic processing isn't suitable.</p>
+                <form onSubmit={handleAddTask} className="space-y-4">
+                    <div>
+                        <label htmlFor="subject" className="block text-sm font-semibold text-gray-700 mb-1">Email Subject</label>
+                        <input
+                            type="text"
+                            id="subject"
+                            value={newTaskSubject}
+                            onChange={(e) => setNewTaskSubject(e.target.value)}
+                            placeholder="e.g., Inquiry about booking #123"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                            required
+                        />
+                    </div>
+                    <div>
+                        <label htmlFor="sender" className="block text-sm font-semibold text-gray-700 mb-1">Sender Email</label>
+                        <input
+                            type="email"
+                            id="sender"
+                            value={newTaskSender}
+                            onChange={(e) => setNewTaskSender(e.target.value)}
+                            placeholder="e.g., customer@example.com"
+                            className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                            required
+                        />
+                    </div>
+                    <button
+                        type="submit"
+                        className="w-full bg-gradient-to-r from-indigo-600 to-purple-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-indigo-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
+                        disabled={actionLoading}
+                    >
+                        {actionLoading ? (
+                            <>
+                                <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                Adding...
+                            </>
+                        ) : (
+                            'Add Manual Task'
+                        )}
+                    </button>
+                </form>
+            </section>
+
+            {/* Task List and Filters */}
+            <section className="p-6 bg-white">
+                <h2 className="text-2xl font-bold mb-4 text-indigo-800">Your Email Tasks</h2>
+
+                {/* Tabs for filtering */}
+                <div className="flex flex-wrap gap-2 mb-6 justify-center sm:justify-start">
+                    {['new', 'awaitingReply', 'replied', 'pendingConfirmation', 'confirmedPendingCityTax', 'loseBookings'].map(tab => (
+                        <button
+                            key={tab}
+                            onClick={() => setActiveTab(tab)}
+                            className={`px-5 py-2 rounded-full text-sm font-semibold transition duration-300 ease-in-out transform hover:scale-105
+                                ${activeTab === tab
+                                    ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-md'
+                                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                }`}
+                        >
+                            {getTabDisplayName(tab)}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Task List */}
+                {filteredTasks.length === 0 ? (
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-8 text-center text-gray-500 shadow-inner flex flex-col items-center justify-center min-h-[150px]">
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-gray-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.928-5.5L12 5.5l1.072-2.5L21 8m-18 0v8a2 2 0 002 2h14a2 2 0 002-2V8m-18 0h18" />
+                        </svg>
+                        <p className="text-lg font-medium mb-2">No tasks found in "{getTabDisplayName(activeTab)}".</p>
+                        <p className="text-sm">Add a new email task or check other categories.</p>
+                    </div>
+                ) : (
+                    <div className="space-y-4">
+                        {filteredTasks.map(task => (
+                            <div key={task.id} className="bg-white border border-gray-200 rounded-lg p-5 shadow-lg hover:shadow-xl transition duration-300 ease-in-out transform hover:-translate-y-1">
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-3">
+                                    <div>
+                                        <h3 className="text-xl font-bold text-gray-900 mb-1">{task.subject}</h3>
+                                        <p className="text-sm text-gray-600 mb-1">From: <span className="font-medium">{task.sender}</span></p>
+                                        {task.taskNo && <p className="text-xs text-gray-500 mb-1">Task ID: <span className="font-mono">{task.taskNo}</span></p>}
+                                        <p className="text-xs text-gray-500">Received: {task.receivedAt.toLocaleString()}</p>
+                                    </div>
+                                    <span className={`mt-3 sm:mt-0 px-4 py-1 rounded-full text-xs font-bold shadow-sm
+                                        ${task.status === 'new' ? 'bg-blue-100 text-blue-800' : ''}
+                                        ${task.status === 'awaitingReply' ? 'bg-yellow-100 text-yellow-800' : ''}
+                                        ${task.status === 'overdue' ? 'bg-red-100 text-red-800 animate-pulse ring-2 ring-red-300' : ''}
+                                        ${task.status === 'replied' ? 'bg-green-100 text-green-800' : ''}
+                                        ${task.status === 'pendingConfirmation' ? 'bg-purple-100 text-purple-800' : ''}
+                                        ${task.status === 'confirmedPendingCityTax' ? 'bg-indigo-100 text-indigo-800' : ''}
+                                        ${task.status === 'loseBookings' ? 'bg-gray-400 text-white' : ''}
+                                    `}>
+                                        {getTabDisplayName(task.status)}
+                                    </span>
+                                </div>
+
+                                {/* Timer display */}
+                                {task.replyTimerActive && (task.status === 'awaitingReply' || task.status === 'overdue') && (
+                                    <div className="mt-3 text-sm text-gray-700 flex items-center">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                        </svg>
+                                        Reply Due In: <span className={`font-mono font-extrabold ml-2 text-base ${task.timeLeft <= 0 ? 'text-red-600' : 'text-indigo-600'}`}>
+                                            {formatTimeLeft(task.timeLeft)}
+                                        </span>
+                                    </div>
+                                )}
+
+                                {/* Action Buttons */}
+                                <div className="mt-5 flex flex-wrap gap-3 justify-start">
+                                    {task.status === 'new' && (
+                                        <button
+                                            onClick={() => handleStartReplyTimer(task)}
+                                            className="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                            disabled={actionLoading}
+                                        >
+                                            {actionLoading ? 'Starting...' : 'Start Reply Timer (2h)'}
+                                        </button>
+                                    )}
+                                    {(task.status === 'new' || task.status === 'awaitingReply' || task.status === 'overdue') && (
+                                        <button
+                                            onClick={() => updateTaskStatus(task.id, 'replied', false)}
+                                            className="bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-green-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                            disabled={actionLoading}
+                                        >
+                                            {actionLoading ? 'Updating...' : 'Mark as Replied'}
+                                        </button>
+                                    )}
+                                    {task.status === 'replied' && (
+                                        <>
+                                            <button
+                                                onClick={() => updateTaskStatus(task.id, 'pendingConfirmation')}
+                                                className="bg-purple-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-purple-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                disabled={actionLoading}
+                                            >
+                                                {actionLoading ? 'Updating...' : 'Received Confirmation'}
+                                            </button>
+                                            <button
+                                                onClick={() => updateTaskStatus(task.id, 'new', false)} // Move back to new for thread simulation
+                                                className="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-orange-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                disabled={actionLoading}
+                                            >
+                                                {actionLoading ? 'Updating...' : 'Received Reply (New Email)'}
+                                            </button>
+                                        </>
+                                    )}
+                                    {task.status === 'pendingConfirmation' && (
+                                        <button
+                                            onClick={() => updateTaskStatus(task.id, 'confirmedPendingCityTax')}
+                                            className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                            disabled={actionLoading}
+                                        >
+                                            {actionLoading ? 'Updating...' : 'Voucher/Invoice Sent'}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </section>
+        </>
+    );
+}
+
+
+function App() {
+    // Firebase related states
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false); // To ensure auth is ready before Firestore ops
+
+    // Authentication form states
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [isLoginMode, setIsLoginMode] = useState(true); // True for login, false for signup
+    const [authError, setAuthError] = useState(''); // Specific error for auth operations
+
+    // Application states
+    const [loading, setLoading] = useState(true); // General loading state for initial app load
+    const [actionLoading, setActionLoading] = useState(false); // Specific loading for actions (add, update, auth)
+    const [error, setError] = useState(null);
+    const [message, setMessage] = useState(''); // For user feedback messages
+    const messageTimeoutRef = useRef(null); // Ref for message timeout
+
+    // Global variables from the environment (Canvas specific)
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+    // Initialize Firebase and handle authentication
+    useEffect(() => {
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const authentication = getAuth(app);
+
+            setDb(firestore);
+            setAuth(authentication);
+
+            // Listen for auth state changes
+            const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                    setAuthError(''); // Clear auth error on successful login
+                } else {
+                    setUserId(null); // Clear userId if logged out
+                    // Attempt to sign in anonymously if no user is logged in and an initial token is provided
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(authentication, initialAuthToken);
+                        } else {
+                            // If no initial token and no logged-in user, allow user to sign in/up
+                        }
+                    } catch (err) {
+                        console.error("Firebase Initial Auth Error:", err);
+                    }
+                }
+                setIsAuthReady(true); // Mark auth as ready regardless of login status
+                setLoading(false); // Stop general loading after auth check
+            });
+
+            return () => unsubscribeAuth(); // Cleanup auth listener
+        } catch (err) {
+            console.error("Firebase Initialization Error:", err);
+            setError("Failed to initialize Firebase. Check console for details.");
+            setLoading(false);
+        }
+    }, [initialAuthToken, firebaseConfig]);
+
+
+    // Function to display temporary messages
+    const showMessage = (msg) => {
+        setMessage(msg);
+        if (messageTimeoutRef.current) {
+            clearTimeout(messageTimeoutRef.current);
+        }
+        messageTimeoutRef.current = setTimeout(() => {
+            setMessage('');
+        }, 3000); // Message disappears after 3 seconds
+    };
+
+    // Handle user login or signup
+    const handleAuth = async (e) => {
+        e.preventDefault();
+        setAuthError('');
+        setActionLoading(true); // Set action loading for auth
+
+        if (!email || !password) {
+            setAuthError("Email and password cannot be empty.");
+            setActionLoading(false);
+            return;
+        }
+
+        try {
+            if (isLoginMode) {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage("Logged in successfully!");
+            } else {
+                await createUserWithEmailAndPassword(auth, email, password);
+                showMessage("Account created and logged in successfully!");
+            }
+            setEmail('');
+            setPassword('');
+        } catch (err) {
+            console.error("Authentication Error:", err);
+            let errorMessage = "An unexpected error occurred.";
+            if (err.code) {
+                switch (err.code) {
+                    case 'auth/email-already-in-use':
+                        errorMessage = 'This email is already in use. Try logging in.';
+                        break;
+                    case 'auth/invalid-email':
+                        errorMessage = 'Invalid email address.';
+                        break;
+                    case 'auth/weak-password':
+                        errorMessage = 'Password should be at least 6 characters.';
+                        break;
+                    case 'auth/user-not-found':
+                    case 'auth/wrong-password':
+                        errorMessage = 'Invalid email or password.';
+                        break;
+                    default:
+                        errorMessage = `Authentication failed: ${err.message}`;
+                }
+            }
+            setAuthError(errorMessage);
+        } finally {
+            setActionLoading(false); // Clear action loading after auth attempt
+        }
+    };
+
+    // Handle user logout
+    const handleLogout = async () => {
+        if (!auth) return;
+        setActionLoading(true); // Set action loading for logout
+        try {
+            await signOut(auth);
+            showMessage("Logged out successfully!");
+        } catch (err) {
+            console.error("Logout Error:", err);
+            setError("Failed to log out.");
+        } finally {
+            setActionLoading(false); // Clear action loading after logout
+        }
+    };
+
     if (!isAuthReady || loading) { // Show loading until auth state is determined
         return (
             <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
@@ -442,26 +682,6 @@ function App() {
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 font-inter text-gray-800 p-4 sm:p-6 lg:p-8">
             <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden">
-                {/* Header */}
-                <header className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white p-6 rounded-t-xl shadow-lg">
-                    <h1 className="text-3xl sm:text-4xl font-extrabold text-center mb-2 tracking-wide">Email Task Manager</h1>
-                    <p className="text-center text-indigo-200 text-sm sm:text-base">Streamline your email workflow with smart task management</p>
-                    {userId && (
-                        <div className="flex flex-col sm:flex-row items-center justify-center text-sm mt-4 text-indigo-100">
-                            <span className="mb-2 sm:mb-0 sm:mr-4 bg-indigo-800 px-3 py-1 rounded-full text-xs font-mono shadow-inner">
-                                User ID: {userId}
-                            </span>
-                            <button
-                                onClick={handleLogout}
-                                className="bg-indigo-800 hover:bg-indigo-900 text-white text-xs px-4 py-2 rounded-full transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
-                                disabled={actionLoading}
-                            >
-                                {actionLoading ? 'Logging Out...' : 'Log Out'}
-                            </button>
-                        </div>
-                    )}
-                </header>
-
                 {/* Message display */}
                 {message && (
                     <div className="bg-green-100 text-green-800 p-3 text-center rounded-b-lg shadow-md animate-fade-in border-b-2 border-green-300">
@@ -538,217 +758,17 @@ function App() {
                             </p>
                         </form>
                     </section>
-                ) : ( // Show task manager if logged in
-                    <>
-                        {/* Process New Email Section */}
-                        <section className="p-6 border-b border-gray-200 bg-gray-50">
-                            <h2 className="text-2xl font-bold mb-4 text-indigo-800">Automate Task Creation</h2>
-                            <p className="text-gray-600 mb-4">Paste raw email content below to automatically extract details and categorize the task.</p>
-                            <form onSubmit={processEmailContent} className="space-y-4">
-                                <div>
-                                    <label htmlFor="rawEmail" className="block text-sm font-semibold text-gray-700 mb-1">Raw Email Content</label>
-                                    <textarea
-                                        id="rawEmail"
-                                        value={rawEmailContent}
-                                        onChange={(e) => setRawEmailContent(e.target.value)}
-                                        placeholder="Paste the full email content (subject, sender, body) here. The app will automatically categorize it."
-                                        rows="6"
-                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm transition duration-200 ease-in-out text-gray-800 resize-y"
-                                        required
-                                    ></textarea>
-                                </div>
-                                <button
-                                    type="submit"
-                                    className="w-full bg-gradient-to-r from-blue-600 to-cyan-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-blue-700 hover:to-cyan-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
-                                    disabled={isProcessingEmail}
-                                >
-                                    {isProcessingEmail ? (
-                                        <>
-                                            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                            </svg>
-                                            Processing Email...
-                                        </>
-                                    ) : (
-                                        'Process Email & Add Task'
-                                    )}
-                                </button>
-                            </form>
-                            <div className="text-center text-sm text-gray-500 mt-4">
-                                Or, use the manual option below if needed.
-                            </div>
-                        </section>
-
-                        {/* Add New Task Form (Manual Input - now secondary) */}
-                        <section className="p-6 border-b border-gray-200 bg-gray-50">
-                            <h2 className="text-2xl font-bold mb-4 text-indigo-800">Manually Add Email Task</h2>
-                            <p className="text-gray-600 mb-4">Enter details for a new email task if automatic processing isn't suitable.</p>
-                            <form onSubmit={handleAddTask} className="space-y-4">
-                                <div>
-                                    <label htmlFor="subject" className="block text-sm font-semibold text-gray-700 mb-1">Email Subject</label>
-                                    <input
-                                        type="text"
-                                        id="subject"
-                                        value={newTaskSubject}
-                                        onChange={(e) => setNewTaskSubject(e.target.value)}
-                                        placeholder="e.g., Inquiry about booking #123"
-                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
-                                        required
-                                    />
-                                </div>
-                                <div>
-                                    <label htmlFor="sender" className="block text-sm font-semibold text-gray-700 mb-1">Sender Email</label>
-                                    <input
-                                        type="email"
-                                        id="sender"
-                                        value={newTaskSender}
-                                        onChange={(e) => setNewTaskSender(e.target.value)}
-                                        placeholder="e.g., customer@example.com"
-                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
-                                        required
-                                    />
-                                </div>
-                                <button
-                                    type="submit"
-                                    className="w-full bg-gradient-to-r from-indigo-600 to-purple-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-indigo-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
-                                    disabled={actionLoading}
-                                >
-                                    {actionLoading ? (
-                                        <>
-                                            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                            </svg>
-                                            Adding...
-                                        </>
-                                    ) : (
-                                        'Add Manual Task'
-                                    )}
-                                </button>
-                            </form>
-                        </section>
-
-                        {/* Task List and Filters */}
-                        <section className="p-6 bg-white">
-                            <h2 className="text-2xl font-bold mb-4 text-indigo-800">Your Email Tasks</h2>
-
-                            {/* Tabs for filtering */}
-                            <div className="flex flex-wrap gap-2 mb-6 justify-center sm:justify-start">
-                                {['new', 'awaitingReply', 'replied', 'pendingConfirmation', 'confirmedPendingCityTax', 'loseBookings'].map(tab => (
-                                    <button
-                                        key={tab}
-                                        onClick={() => setActiveTab(tab)}
-                                        className={`px-5 py-2 rounded-full text-sm font-semibold transition duration-300 ease-in-out transform hover:scale-105
-                                            ${activeTab === tab
-                                                ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-md'
-                                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                            }`}
-                                    >
-                                        {getTabDisplayName(tab)}
-                                    </button>
-                                ))}
-                            </div>
-
-                            {/* Task List */}
-                            {filteredTasks.length === 0 ? (
-                                <div className="bg-gray-50 border border-gray-200 rounded-lg p-8 text-center text-gray-500 shadow-inner flex flex-col items-center justify-center min-h-[150px]">
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-gray-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.928-5.5L12 5.5l1.072-2.5L21 8m-18 0v8a2 2 0 002 2h14a2 2 0 002-2V8m-18 0h18" />
-                                    </svg>
-                                    <p className="text-lg font-medium mb-2">No tasks found in "{getTabDisplayName(activeTab)}".</p>
-                                    <p className="text-sm">Add a new email task or check other categories.</p>
-                                </div>
-                            ) : (
-                                <div className="space-y-4">
-                                    {filteredTasks.map(task => (
-                                        <div key={task.id} className="bg-white border border-gray-200 rounded-lg p-5 shadow-lg hover:shadow-xl transition duration-300 ease-in-out transform hover:-translate-y-1">
-                                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-3">
-                                                <div>
-                                                    <h3 className="text-xl font-bold text-gray-900 mb-1">{task.subject}</h3>
-                                                    <p className="text-sm text-gray-600 mb-1">From: <span className="font-medium">{task.sender}</span></p>
-                                                    {task.taskNo && <p className="text-xs text-gray-500 mb-1">Task ID: <span className="font-mono">{task.taskNo}</span></p>}
-                                                    <p className="text-xs text-gray-500">Received: {task.receivedAt.toLocaleString()}</p>
-                                                </div>
-                                                <span className={`mt-3 sm:mt-0 px-4 py-1 rounded-full text-xs font-bold shadow-sm
-                                                    ${task.status === 'new' ? 'bg-blue-100 text-blue-800' : ''}
-                                                    ${task.status === 'awaitingReply' ? 'bg-yellow-100 text-yellow-800' : ''}
-                                                    ${task.status === 'overdue' ? 'bg-red-100 text-red-800 animate-pulse ring-2 ring-red-300' : ''}
-                                                    ${task.status === 'replied' ? 'bg-green-100 text-green-800' : ''}
-                                                    ${task.status === 'pendingConfirmation' ? 'bg-purple-100 text-purple-800' : ''}
-                                                    ${task.status === 'confirmedPendingCityTax' ? 'bg-indigo-100 text-indigo-800' : ''}
-                                                    ${task.status === 'loseBookings' ? 'bg-gray-400 text-white' : ''}
-                                                `}>
-                                                    {getTabDisplayName(task.status)}
-                                                </span>
-                                            </div>
-
-                                            {/* Timer display */}
-                                            {task.replyTimerActive && (task.status === 'awaitingReply' || task.status === 'overdue') && (
-                                                <div className="mt-3 text-sm text-gray-700 flex items-center">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                    </svg>
-                                                    Reply Due In: <span className={`font-mono font-extrabold ml-2 text-base ${task.timeLeft <= 0 ? 'text-red-600' : 'text-indigo-600'}`}>
-                                                        {formatTimeLeft(task.timeLeft)}
-                                                    </span>
-                                                </div>
-                                            )}
-
-                                            {/* Action Buttons */}
-                                            <div className="mt-5 flex flex-wrap gap-3 justify-start">
-                                                {task.status === 'new' && (
-                                                    <button
-                                                        onClick={() => handleStartReplyTimer(task)}
-                                                        className="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
-                                                        disabled={actionLoading}
-                                                    >
-                                                        {actionLoading ? 'Starting...' : 'Start Reply Timer (2h)'}
-                                                    </button>
-                                                )}
-                                                {(task.status === 'new' || task.status === 'awaitingReply' || task.status === 'overdue') && (
-                                                    <button
-                                                        onClick={() => updateTaskStatus(task.id, 'replied', false)}
-                                                        className="bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-green-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
-                                                        disabled={actionLoading}
-                                                    >
-                                                        {actionLoading ? 'Updating...' : 'Mark as Replied'}
-                                                    </button>
-                                                )}
-                                                {task.status === 'replied' && (
-                                                    <>
-                                                        <button
-                                                            onClick={() => updateTaskStatus(task.id, 'pendingConfirmation')}
-                                                            className="bg-purple-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-purple-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
-                                                            disabled={actionLoading}
-                                                        >
-                                                            {actionLoading ? 'Updating...' : 'Received Confirmation'}
-                                                        </button>
-                                                        <button
-                                                            onClick={() => updateTaskStatus(task.id, 'new', false)} // Move back to new for thread simulation
-                                                            className="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-orange-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
-                                                            disabled={actionLoading}
-                                                        >
-                                                            {actionLoading ? 'Updating...' : 'Received Reply (New Email)'}
-                                                        </button>
-                                                    </>
-                                                )}
-                                                {task.status === 'pendingConfirmation' && (
-                                                    <button
-                                                        onClick={() => updateTaskStatus(task.id, 'confirmedPendingCityTax')}
-                                                        className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
-                                                        disabled={actionLoading}
-                                                    >
-                                                        {actionLoading ? 'Updating...' : 'Voucher/Invoice Sent'}
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </section>
-                    </>
+                ) : ( // Show Home component if logged in
+                    <Home
+                        db={db}
+                        userId={userId}
+                        appId={appId}
+                        actionLoading={actionLoading}
+                        setActionLoading={setActionLoading}
+                        showMessage={showMessage}
+                        setError={setError}
+                        handleLogout={handleLogout} // Pass handleLogout to Home
+                    />
                 )}
             </div>
         </div>
