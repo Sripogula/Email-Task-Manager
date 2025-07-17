@@ -1,0 +1,758 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import {
+    getAuth,
+    signInAnonymously,
+    signInWithCustomToken,
+    onAuthStateChanged,
+    createUserWithEmailAndPassword, // For new user registration
+    signInWithEmailAndPassword,     // For existing user login
+    signOut                         // For logging out
+} from 'firebase/auth';
+import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, doc, Timestamp } from 'firebase/firestore';
+
+// Ensure Tailwind CSS is loaded for styling
+// This script tag is typically in the HTML head, but including it here for completeness
+// <script src="https://cdn.tailwindcss.com"></script>
+
+function App() {
+    // Firebase related states
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false); // To ensure auth is ready before Firestore ops
+
+    // Authentication form states
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [isLoginMode, setIsLoginMode] = useState(true); // True for login, false for signup
+    const [authError, setAuthError] = useState(''); // Specific error for auth operations
+
+    // Application states
+    const [tasks, setTasks] = useState([]);
+    const [loading, setLoading] = useState(true); // General loading state for initial app load
+    const [actionLoading, setActionLoading] = useState(false); // Specific loading for actions (add, update, auth)
+    const [error, setError] = useState(null);
+    const [newTaskSubject, setNewTaskSubject] = useState('');
+    const [newTaskSender, setNewTaskSender] = useState('');
+    const [rawEmailContent, setRawEmailContent] = useState(''); // New state for raw email input
+    const [isProcessingEmail, setIsProcessingEmail] = useState(false); // Loading for LLM processing
+
+    const [activeTab, setActiveTab] = useState('new'); // For filtering tasks
+    const [message, setMessage] = useState(''); // For user feedback messages
+    const messageTimeoutRef = useRef(null); // Ref for message timeout
+
+    // Global variables from the environment (Canvas specific)
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+    // Initialize Firebase and handle authentication
+    useEffect(() => {
+        try {
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const authentication = getAuth(app);
+
+            setDb(firestore);
+            setAuth(authentication);
+
+            // Listen for auth state changes
+            const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                    setAuthError(''); // Clear auth error on successful login
+                } else {
+                    setUserId(null); // Clear userId if logged out
+                    // Attempt to sign in anonymously if no user is logged in and an initial token is provided
+                    try {
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(authentication, initialAuthToken);
+                        } else {
+                            // If no initial token and no logged-in user, allow user to sign in/up
+                        }
+                    } catch (err) {
+                        console.error("Firebase Initial Auth Error:", err);
+                    }
+                }
+                setIsAuthReady(true); // Mark auth as ready regardless of login status
+                setLoading(false); // Stop general loading after auth check
+            });
+
+            return () => unsubscribeAuth(); // Cleanup auth listener
+        } catch (err) {
+            console.error("Firebase Initialization Error:", err);
+            setError("Failed to initialize Firebase. Check console for details.");
+            setLoading(false);
+        }
+    }, [initialAuthToken, firebaseConfig]);
+
+    // Fetch tasks when Firebase is ready and userId is available
+    useEffect(() => {
+        if (!db || !userId || !isAuthReady) {
+            setTasks([]); // Clear tasks if not authenticated
+            return;
+        }
+
+        setActionLoading(true); // Set action loading for task fetch
+        setError(null);
+
+        // Define the collection path for private user data
+        const tasksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_tasks`);
+        const q = query(tasksCollectionRef); // No orderBy to avoid index issues
+
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            const fetchedTasks = snapshot.docs.map(doc => {
+                const data = doc.data();
+                return {
+                    id: doc.id,
+                    ...data,
+                    // Convert Firestore Timestamps to Date objects for easier handling
+                    receivedAt: data.receivedAt ? data.receivedAt.toDate() : new Date(),
+                    replyDueBy: data.replyDueBy ? data.replyDueBy.toDate() : null,
+                };
+            });
+            // Sort tasks by receivedAt in descending order (most recent first)
+            fetchedTasks.sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+            setTasks(fetchedTasks);
+            setActionLoading(false); // Clear action loading after fetch
+        }, (err) => {
+            console.error("Firestore Fetch Error:", err);
+            setError("Failed to load tasks. Please refresh.");
+            setActionLoading(false); // Clear action loading on error
+        });
+
+        return () => unsubscribe(); // Cleanup snapshot listener
+    }, [db, userId, isAuthReady, appId]);
+
+    // Timer update effect
+    useEffect(() => {
+        const timerInterval = setInterval(() => {
+            setTasks(prevTasks =>
+                prevTasks.map(task => {
+                    if (task.replyTimerActive && task.replyDueBy) {
+                        const now = new Date();
+                        const timeLeftMs = task.replyDueBy.getTime() - now.getTime();
+                        if (timeLeftMs <= 0) {
+                            // If timer expires, update status to 'overdue' and deactivate timer
+                            // This update will also be pushed to Firestore
+                            if (task.status !== 'overdue') {
+                                updateTaskStatus(task.id, 'overdue', false); // Update Firestore
+                            }
+                            return { ...task, status: 'overdue', replyTimerActive: false, timeLeft: 0 };
+                        }
+                        return { ...task, timeLeft: timeLeftMs };
+                    }
+                    return task;
+                })
+            );
+        }, 1000); // Update every second
+
+        return () => clearInterval(timerInterval); // Clean up interval on component unmount
+    }, [tasks]); // Re-run if tasks change to ensure new timers are tracked
+
+    // Function to display temporary messages
+    const showMessage = (msg) => {
+        setMessage(msg);
+        if (messageTimeoutRef.current) {
+            clearTimeout(messageTimeoutRef.current);
+        }
+        messageTimeoutRef.current = setTimeout(() => {
+            setMessage('');
+        }, 3000); // Message disappears after 3 seconds
+    };
+
+    // Handle user login or signup
+    const handleAuth = async (e) => {
+        e.preventDefault();
+        setAuthError('');
+        setActionLoading(true); // Set action loading for auth
+
+        if (!email || !password) {
+            setAuthError("Email and password cannot be empty.");
+            setActionLoading(false);
+            return;
+        }
+
+        try {
+            if (isLoginMode) {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage("Logged in successfully!");
+            } else {
+                await createUserWithEmailAndPassword(auth, email, password);
+                showMessage("Account created and logged in successfully!");
+            }
+            setEmail('');
+            setPassword('');
+        } catch (err) {
+            console.error("Authentication Error:", err);
+            let errorMessage = "An unexpected error occurred.";
+            if (err.code) {
+                switch (err.code) {
+                    case 'auth/email-already-in-use':
+                        errorMessage = 'This email is already in use. Try logging in.';
+                        break;
+                    case 'auth/invalid-email':
+                        errorMessage = 'Invalid email address.';
+                        break;
+                    case 'auth/weak-password':
+                        errorMessage = 'Password should be at least 6 characters.';
+                        break;
+                    case 'auth/user-not-found':
+                    case 'auth/wrong-password':
+                        errorMessage = 'Invalid email or password.';
+                        break;
+                    default:
+                        errorMessage = `Authentication failed: ${err.message}`;
+                }
+            }
+            setAuthError(errorMessage);
+        } finally {
+            setActionLoading(false); // Clear action loading after auth attempt
+        }
+    };
+
+    // Handle user logout
+    const handleLogout = async () => {
+        if (!auth) return;
+        setActionLoading(true); // Set action loading for logout
+        try {
+            await signOut(auth);
+            showMessage("Logged out successfully!");
+            setTasks([]); // Clear tasks on logout
+        } catch (err) {
+            console.error("Logout Error:", err);
+            setError("Failed to log out.");
+        } finally {
+            setActionLoading(false); // Clear action loading after logout
+        }
+    };
+
+    // Add a new task (manual input)
+    const handleAddTask = async (e) => {
+        e.preventDefault();
+        if (!newTaskSubject.trim() || !newTaskSender.trim() || !db || !userId) {
+            showMessage("Subject and Sender cannot be empty.");
+            return;
+        }
+
+        setActionLoading(true); // Set action loading for add task
+        try {
+            const tasksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_tasks`);
+            const newTaskRef = await addDoc(tasksCollectionRef, {
+                subject: newTaskSubject.trim(),
+                sender: newTaskSender.trim(),
+                receivedAt: Timestamp.now(), // Store as Firestore Timestamp
+                status: 'new', // Default status for manually added tasks
+                replyDueBy: null,
+                replyTimerActive: false,
+                userId: userId, // Store userId for security rules
+            });
+
+            // Generate and update taskNo
+            const date = new Date();
+            const yyyy = date.getFullYear();
+            const mm = String(date.getMonth() + 1).padStart(2, '0');
+            const dd = String(date.getDate()).padStart(2, '0');
+            const taskNo = `T-${yyyy}${mm}${dd}-${newTaskRef.id.substring(0, 8).toUpperCase()}`;
+            await updateDoc(newTaskRef, { taskNo: taskNo });
+
+            setNewTaskSubject('');
+            setNewTaskSender('');
+            showMessage("Manual task added successfully!");
+        } catch (err) {
+            console.error("Error adding task:", err);
+            setError("Failed to add task.");
+        } finally {
+            setActionLoading(false); // Clear action loading after add task
+        }
+    };
+
+    // Process email content using LLM
+    const processEmailContent = async (e) => {
+        e.preventDefault();
+        if (!rawEmailContent.trim() || !db || !userId) {
+            showMessage("Please paste email content to process.");
+            return;
+        }
+
+        setIsProcessingEmail(true); // Set loading for LLM call
+        setError(null);
+
+        try {
+            const prompt = `Analyze the following email content. Extract the 'subject' and 'sender' email address. Based on the content, assign a 'category':
+            - If the email contains "rate and hotel" (case-insensitive) or "Guest name" (case-insensitive), categorize as "pendingConfirmation".
+            - If neither of the above keywords are found, categorize as "loseBookings".
+            - Otherwise, categorize as "new".
+
+            Return the output as a JSON object with 'subject', 'sender', and 'category' fields.
+            Email Content:
+            "${rawEmailContent}"`;
+
+            let chatHistory = [];
+            chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+
+            const payload = {
+                contents: chatHistory,
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "subject": { "type": "STRING" },
+                            "sender": { "type": "STRING" },
+                            "category": { "type": "STRING" }
+                        },
+                        "propertyOrdering": ["subject", "sender", "category"]
+                    }
+                }
+            };
+
+            const apiKey = ""; // Canvas will provide this
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                const jsonText = result.candidates[0].content.parts[0].text;
+                const parsedJson = JSON.parse(jsonText);
+
+                const { subject, sender, category } = parsedJson;
+
+                if (!subject || !sender || !category) {
+                    throw new Error("LLM did not return complete or valid data.");
+                }
+
+                const tasksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_tasks`);
+                const newTaskRef = await addDoc(tasksCollectionRef, {
+                    subject: subject.trim(),
+                    sender: sender.trim(),
+                    receivedAt: Timestamp.now(),
+                    status: category, // Use LLM-determined category
+                    replyDueBy: null,
+                    replyTimerActive: false,
+                    userId: userId,
+                });
+
+                // Generate and update taskNo
+                const date = new Date();
+                const yyyy = date.getFullYear();
+                const mm = String(date.getMonth() + 1).padStart(2, '0');
+                const dd = String(date.getDate()).padStart(2, '0');
+                const taskNo = `T-${yyyy}${mm}${dd}-${newTaskRef.id.substring(0, 8).toUpperCase()}`;
+                await updateDoc(newTaskRef, { taskNo: taskNo });
+
+                setRawEmailContent(''); // Clear the textarea
+                showMessage(`Email processed! Task added to "${getTabDisplayName(category)}".`);
+
+            } else {
+                throw new Error("LLM response structure unexpected or empty.");
+            }
+        } catch (err) {
+            console.error("Error processing email with LLM:", err);
+            setError(`Failed to process email: ${err.message}. Please try again or add manually.`);
+        } finally {
+            setIsProcessingEmail(false); // Clear LLM loading
+        }
+    };
+
+
+    // Update task status and optionally timer
+    const updateTaskStatus = async (taskId, newStatus, replyTimerActive = false, replyDueBy = null) => {
+        if (!db || !userId) return;
+
+        setActionLoading(true); // Set action loading for update task
+        try {
+            const taskDocRef = doc(db, `artifacts/${appId}/users/${userId}/email_tasks`, taskId);
+            await updateDoc(taskDocRef, {
+                status: newStatus,
+                replyTimerActive: replyTimerActive,
+                replyDueBy: replyDueBy ? Timestamp.fromDate(replyDueBy) : null, // Convert Date to Timestamp
+            });
+            showMessage(`Task updated to "${getTabDisplayName(newStatus).toLowerCase()}"!`);
+        } catch (err) {
+            console.error("Error updating task:", err);
+            setError("Failed to update task status.");
+        } finally {
+            setActionLoading(false); // Clear action loading after update task
+        }
+    };
+
+    // Start the 2-hour reply timer for a task
+    const handleStartReplyTimer = (task) => {
+        const now = new Date();
+        const replyDue = new Date(now.getTime() + 2 * 60 * 60 * 1000); // 2 hours from now
+        updateTaskStatus(task.id, 'awaitingReply', true, replyDue);
+    };
+
+    // Format time left for display
+    const formatTimeLeft = (ms) => {
+        if (ms <= 0) return "Overdue";
+        const totalSeconds = Math.floor(ms / 1000);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    };
+
+    // Filter tasks based on the active tab
+    const filteredTasks = tasks.filter(task => {
+        if (activeTab === 'new') return task.status === 'new';
+        if (activeTab === 'awaitingReply') return task.status === 'awaitingReply' || task.status === 'overdue';
+        if (activeTab === 'replied') return task.status === 'replied';
+        if (activeTab === 'pendingConfirmation') return task.status === 'pendingConfirmation';
+        if (activeTab === 'confirmedPendingCityTax') return task.status === 'confirmedPendingCityTax';
+        if (activeTab === 'loseBookings') return task.status === 'loseBookings'; // New filter
+        return true; // Should not happen with defined tabs
+    });
+
+    // Determine the display name for the tab
+    const getTabDisplayName = (tab) => {
+        switch (tab) {
+            case 'new': return 'New Emails';
+            case 'awaitingReply': return 'Awaiting Reply';
+            case 'replied': return 'Replied';
+            case 'pendingConfirmation': return 'Pending Confirmation';
+            case 'confirmedPendingCityTax': return 'Confirmed (Pending City Tax)';
+            case 'loseBookings': return 'Lose Bookings'; // New display name
+            default: return '';
+        }
+    };
+
+    if (!isAuthReady || loading) { // Show loading until auth state is determined
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
+                <div className="text-center text-gray-700">
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900 mx-auto mb-4"></div>
+                    <p>Loading application...</p>
+                    {error && <p className="text-red-500 mt-2">{error}</p>}
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 font-inter text-gray-800 p-4 sm:p-6 lg:p-8">
+            <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-2xl overflow-hidden">
+                {/* Header */}
+                <header className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white p-6 rounded-t-xl shadow-lg">
+                    <h1 className="text-3xl sm:text-4xl font-extrabold text-center mb-2 tracking-wide">Email Task Manager</h1>
+                    <p className="text-center text-indigo-200 text-sm sm:text-base">Streamline your email workflow with smart task management</p>
+                    {userId && (
+                        <div className="flex flex-col sm:flex-row items-center justify-center text-sm mt-4 text-indigo-100">
+                            <span className="mb-2 sm:mb-0 sm:mr-4 bg-indigo-800 px-3 py-1 rounded-full text-xs font-mono shadow-inner">
+                                User ID: {userId}
+                            </span>
+                            <button
+                                onClick={handleLogout}
+                                className="bg-indigo-800 hover:bg-indigo-900 text-white text-xs px-4 py-2 rounded-full transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                disabled={actionLoading}
+                            >
+                                {actionLoading ? 'Logging Out...' : 'Log Out'}
+                            </button>
+                        </div>
+                    )}
+                </header>
+
+                {/* Message display */}
+                {message && (
+                    <div className="bg-green-100 text-green-800 p-3 text-center rounded-b-lg shadow-md animate-fade-in border-b-2 border-green-300">
+                        {message}
+                    </div>
+                )}
+                {error && (
+                    <div className="bg-red-100 text-red-800 p-3 text-center rounded-b-lg shadow-md animate-fade-in border-b-2 border-red-300">
+                        {error}
+                    </div>
+                )}
+                {authError && (
+                    <div className="bg-red-100 text-red-800 p-3 text-center rounded-b-lg shadow-md animate-fade-in border-b-2 border-red-300">
+                        {authError}
+                    </div>
+                )}
+
+                {!userId ? ( // Show authentication form if not logged in
+                    <section className="p-6 bg-gray-50">
+                        <h2 className="text-2xl font-bold mb-6 text-indigo-800 text-center">
+                            {isLoginMode ? 'Welcome Back! Log In' : 'Join Us! Create Your Account'}
+                        </h2>
+                        <form onSubmit={handleAuth} className="space-y-5 max-w-sm mx-auto p-6 bg-white rounded-xl shadow-xl border border-gray-200">
+                            <div>
+                                <label htmlFor="email" className="block text-sm font-semibold text-gray-700 mb-1">Email Address</label>
+                                <input
+                                    type="email"
+                                    id="email"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    placeholder="your.email@example.com"
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                                    required
+                                />
+                            </div>
+                            <div>
+                                <label htmlFor="password" className="block text-sm font-semibold text-gray-700 mb-1">Password</label>
+                                <input
+                                    type="password"
+                                    id="password"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    placeholder="••••••••"
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                                    required
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                className="w-full bg-gradient-to-r from-indigo-600 to-purple-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-indigo-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
+                                disabled={actionLoading}
+                            >
+                                {actionLoading ? (
+                                    <>
+                                        <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        {isLoginMode ? 'Logging In...' : 'Signing Up...'}
+                                    </>
+                                ) : (
+                                    isLoginMode ? 'Log In' : 'Sign Up'
+                                )}
+                            </button>
+                            <p className="text-center text-sm mt-4 text-gray-600">
+                                {isLoginMode ? "Don't have an account?" : "Already have an account?"}{' '}
+                                <button
+                                    type="button"
+                                    onClick={() => setIsLoginMode(!isLoginMode)}
+                                    className="text-indigo-600 hover:text-indigo-800 font-bold transition duration-150 ease-in-out"
+                                >
+                                    {isLoginMode ? 'Sign Up Here' : 'Log In Here'}
+                                </button>
+                            </p>
+                        </form>
+                    </section>
+                ) : ( // Show task manager if logged in
+                    <>
+                        {/* Process New Email Section */}
+                        <section className="p-6 border-b border-gray-200 bg-gray-50">
+                            <h2 className="text-2xl font-bold mb-4 text-indigo-800">Automate Task Creation</h2>
+                            <p className="text-gray-600 mb-4">Paste raw email content below to automatically extract details and categorize the task.</p>
+                            <form onSubmit={processEmailContent} className="space-y-4">
+                                <div>
+                                    <label htmlFor="rawEmail" className="block text-sm font-semibold text-gray-700 mb-1">Raw Email Content</label>
+                                    <textarea
+                                        id="rawEmail"
+                                        value={rawEmailContent}
+                                        onChange={(e) => setRawEmailContent(e.target.value)}
+                                        placeholder="Paste the full email content (subject, sender, body) here. The app will automatically categorize it."
+                                        rows="6"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm transition duration-200 ease-in-out text-gray-800 resize-y"
+                                        required
+                                    ></textarea>
+                                </div>
+                                <button
+                                    type="submit"
+                                    className="w-full bg-gradient-to-r from-blue-600 to-cyan-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-blue-700 hover:to-cyan-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
+                                    disabled={isProcessingEmail}
+                                >
+                                    {isProcessingEmail ? (
+                                        <>
+                                            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            Processing Email...
+                                        </>
+                                    ) : (
+                                        'Process Email & Add Task'
+                                    )}
+                                </button>
+                            </form>
+                            <div className="text-center text-sm text-gray-500 mt-4">
+                                Or, use the manual option below if needed.
+                            </div>
+                        </section>
+
+                        {/* Add New Task Form (Manual Input - now secondary) */}
+                        <section className="p-6 border-b border-gray-200 bg-gray-50">
+                            <h2 className="text-2xl font-bold mb-4 text-indigo-800">Manually Add Email Task</h2>
+                            <p className="text-gray-600 mb-4">Enter details for a new email task if automatic processing isn't suitable.</p>
+                            <form onSubmit={handleAddTask} className="space-y-4">
+                                <div>
+                                    <label htmlFor="subject" className="block text-sm font-semibold text-gray-700 mb-1">Email Subject</label>
+                                    <input
+                                        type="text"
+                                        id="subject"
+                                        value={newTaskSubject}
+                                        onChange={(e) => setNewTaskSubject(e.target.value)}
+                                        placeholder="e.g., Inquiry about booking #123"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                                        required
+                                    />
+                                </div>
+                                <div>
+                                    <label htmlFor="sender" className="block text-sm font-semibold text-gray-700 mb-1">Sender Email</label>
+                                    <input
+                                        type="email"
+                                        id="sender"
+                                        value={newTaskSender}
+                                        onChange={(e) => setNewTaskSender(e.target.value)}
+                                        placeholder="e.g., customer@example.com"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                                        required
+                                    />
+                                </div>
+                                <button
+                                    type="submit"
+                                    className="w-full bg-gradient-to-r from-indigo-600 to-purple-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-indigo-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
+                                    disabled={actionLoading}
+                                >
+                                    {actionLoading ? (
+                                        <>
+                                            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            Adding...
+                                        </>
+                                    ) : (
+                                        'Add Manual Task'
+                                    )}
+                                </button>
+                            </form>
+                        </section>
+
+                        {/* Task List and Filters */}
+                        <section className="p-6 bg-white">
+                            <h2 className="text-2xl font-bold mb-4 text-indigo-800">Your Email Tasks</h2>
+
+                            {/* Tabs for filtering */}
+                            <div className="flex flex-wrap gap-2 mb-6 justify-center sm:justify-start">
+                                {['new', 'awaitingReply', 'replied', 'pendingConfirmation', 'confirmedPendingCityTax', 'loseBookings'].map(tab => (
+                                    <button
+                                        key={tab}
+                                        onClick={() => setActiveTab(tab)}
+                                        className={`px-5 py-2 rounded-full text-sm font-semibold transition duration-300 ease-in-out transform hover:scale-105
+                                            ${activeTab === tab
+                                                ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-md'
+                                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                            }`}
+                                    >
+                                        {getTabDisplayName(tab)}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Task List */}
+                            {filteredTasks.length === 0 ? (
+                                <div className="bg-gray-50 border border-gray-200 rounded-lg p-8 text-center text-gray-500 shadow-inner flex flex-col items-center justify-center min-h-[150px]">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-gray-400 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l7.928-5.5L12 5.5l1.072-2.5L21 8m-18 0v8a2 2 0 002 2h14a2 2 0 002-2V8m-18 0h18" />
+                                    </svg>
+                                    <p className="text-lg font-medium mb-2">No tasks found in "{getTabDisplayName(activeTab)}".</p>
+                                    <p className="text-sm">Add a new email task or check other categories.</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    {filteredTasks.map(task => (
+                                        <div key={task.id} className="bg-white border border-gray-200 rounded-lg p-5 shadow-lg hover:shadow-xl transition duration-300 ease-in-out transform hover:-translate-y-1">
+                                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-3">
+                                                <div>
+                                                    <h3 className="text-xl font-bold text-gray-900 mb-1">{task.subject}</h3>
+                                                    <p className="text-sm text-gray-600 mb-1">From: <span className="font-medium">{task.sender}</span></p>
+                                                    {task.taskNo && <p className="text-xs text-gray-500 mb-1">Task ID: <span className="font-mono">{task.taskNo}</span></p>}
+                                                    <p className="text-xs text-gray-500">Received: {task.receivedAt.toLocaleString()}</p>
+                                                </div>
+                                                <span className={`mt-3 sm:mt-0 px-4 py-1 rounded-full text-xs font-bold shadow-sm
+                                                    ${task.status === 'new' ? 'bg-blue-100 text-blue-800' : ''}
+                                                    ${task.status === 'awaitingReply' ? 'bg-yellow-100 text-yellow-800' : ''}
+                                                    ${task.status === 'overdue' ? 'bg-red-100 text-red-800 animate-pulse ring-2 ring-red-300' : ''}
+                                                    ${task.status === 'replied' ? 'bg-green-100 text-green-800' : ''}
+                                                    ${task.status === 'pendingConfirmation' ? 'bg-purple-100 text-purple-800' : ''}
+                                                    ${task.status === 'confirmedPendingCityTax' ? 'bg-indigo-100 text-indigo-800' : ''}
+                                                    ${task.status === 'loseBookings' ? 'bg-gray-400 text-white' : ''}
+                                                `}>
+                                                    {getTabDisplayName(task.status)}
+                                                </span>
+                                            </div>
+
+                                            {/* Timer display */}
+                                            {task.replyTimerActive && (task.status === 'awaitingReply' || task.status === 'overdue') && (
+                                                <div className="mt-3 text-sm text-gray-700 flex items-center">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                    </svg>
+                                                    Reply Due In: <span className={`font-mono font-extrabold ml-2 text-base ${task.timeLeft <= 0 ? 'text-red-600' : 'text-indigo-600'}`}>
+                                                        {formatTimeLeft(task.timeLeft)}
+                                                    </span>
+                                                </div>
+                                            )}
+
+                                            {/* Action Buttons */}
+                                            <div className="mt-5 flex flex-wrap gap-3 justify-start">
+                                                {task.status === 'new' && (
+                                                    <button
+                                                        onClick={() => handleStartReplyTimer(task)}
+                                                        className="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                        disabled={actionLoading}
+                                                    >
+                                                        {actionLoading ? 'Starting...' : 'Start Reply Timer (2h)'}
+                                                    </button>
+                                                )}
+                                                {(task.status === 'new' || task.status === 'awaitingReply' || task.status === 'overdue') && (
+                                                    <button
+                                                        onClick={() => updateTaskStatus(task.id, 'replied', false)}
+                                                        className="bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-green-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                        disabled={actionLoading}
+                                                    >
+                                                        {actionLoading ? 'Updating...' : 'Mark as Replied'}
+                                                    </button>
+                                                )}
+                                                {task.status === 'replied' && (
+                                                    <>
+                                                        <button
+                                                            onClick={() => updateTaskStatus(task.id, 'pendingConfirmation')}
+                                                            className="bg-purple-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-purple-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                            disabled={actionLoading}
+                                                        >
+                                                            {actionLoading ? 'Updating...' : 'Received Confirmation'}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => updateTaskStatus(task.id, 'new', false)} // Move back to new for thread simulation
+                                                            className="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-orange-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                            disabled={actionLoading}
+                                                        >
+                                                            {actionLoading ? 'Updating...' : 'Received Reply (New Email)'}
+                                                        </button>
+                                                    </>
+                                                )}
+                                                {task.status === 'pendingConfirmation' && (
+                                                    <button
+                                                        onClick={() => updateTaskStatus(task.id, 'confirmedPendingCityTax')}
+                                                        className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-600 transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
+                                                        disabled={actionLoading}
+                                                    >
+                                                        {actionLoading ? 'Updating...' : 'Voucher/Invoice Sent'}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </section>
+                    </>
+                )}
+            </div>
+        </div>
+    );
+}
+
+export default App;
