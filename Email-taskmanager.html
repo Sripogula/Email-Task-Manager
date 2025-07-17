@@ -16,7 +16,7 @@ import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, doc, Ti
 // <script src="https://cdn.tailwindcss.com"></script>
 
 // Home Component - Contains the main application logic for authenticated users
-function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage, setError, handleLogout }) { // Added handleLogout prop
+function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage, setError, handleLogout, organizationId }) { // Added organizationId prop
     // Application states
     const [tasks, setTasks] = useState([]);
     const [newTaskSubject, setNewTaskSubject] = useState('');
@@ -28,16 +28,16 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
 
     // Fetch tasks when Firebase is ready and userId is available
     useEffect(() => {
-        if (!db || !userId) {
-            setTasks([]); // Clear tasks if not authenticated
+        if (!db || !userId || !organizationId) { // Ensure organizationId is also available
+            setTasks([]); // Clear tasks if not authenticated or no organization
             return;
         }
 
         setActionLoading(true); // Set action loading for task fetch
         setError(null);
 
-        // Define the collection path for private user data
-        const tasksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_tasks`);
+        // Define the collection path for organization-specific data
+        const tasksCollectionRef = collection(db, `artifacts/${appId}/organizations/${organizationId}/tasks`);
         const q = query(tasksCollectionRef); // No orderBy to avoid index issues
 
         const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -62,7 +62,7 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
         });
 
         return () => unsubscribe(); // Cleanup snapshot listener
-    }, [db, userId, appId, setActionLoading, setError]);
+    }, [db, userId, appId, organizationId, setActionLoading, setError]); // Added organizationId to dependencies
 
     // Timer update effect
     useEffect(() => {
@@ -94,14 +94,14 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
     // Add a new task (manual input)
     const handleAddTask = async (e) => {
         e.preventDefault();
-        if (!newTaskSubject.trim() || !newTaskSender.trim() || !db || !userId) {
-            showMessage("Subject and Sender cannot be empty.");
+        if (!newTaskSubject.trim() || !newTaskSender.trim() || !db || !userId || !organizationId) {
+            showMessage("Subject, Sender, and Organization ID cannot be empty.");
             return;
         }
 
         setActionLoading(true); // Set action loading for add task
         try {
-            const tasksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_tasks`);
+            const tasksCollectionRef = collection(db, `artifacts/${appId}/organizations/${organizationId}/tasks`);
             const newTaskRef = await addDoc(tasksCollectionRef, {
                 subject: newTaskSubject.trim(),
                 sender: newTaskSender.trim(),
@@ -110,6 +110,7 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
                 replyDueBy: null,
                 replyTimerActive: false,
                 userId: userId, // Store userId for security rules
+                organizationId: organizationId, // Store organizationId
             });
 
             // Generate and update taskNo
@@ -134,8 +135,8 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
     // Process email content using LLM
     const processEmailContent = async (e) => {
         e.preventDefault();
-        if (!rawEmailContent.trim() || !db || !userId) {
-            showMessage("Please paste email content to process.");
+        if (!rawEmailContent.trim() || !db || !userId || !organizationId) {
+            showMessage("Please paste email content and ensure Organization ID is set.");
             return;
         }
 
@@ -194,7 +195,7 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
                     throw new Error("LLM did not return complete or valid data.");
                 }
 
-                const tasksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/email_tasks`);
+                const tasksCollectionRef = collection(db, `artifacts/${appId}/organizations/${organizationId}/tasks`);
                 const newTaskRef = await addDoc(tasksCollectionRef, {
                     subject: subject.trim(),
                     sender: sender.trim(),
@@ -203,6 +204,7 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
                     replyDueBy: null,
                     replyTimerActive: false,
                     userId: userId,
+                    organizationId: organizationId, // Store organizationId
                 });
 
                 // Generate and update taskNo
@@ -230,11 +232,11 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
 
     // Update task status and optionally timer
     const updateTaskStatus = async (taskId, newStatus, replyTimerActive = false, replyDueBy = null) => {
-        if (!db || !userId) return;
+        if (!db || !userId || !organizationId) return;
 
         setActionLoading(true); // Set action loading for update task
         try {
-            const taskDocRef = doc(db, `artifacts/${appId}/users/${userId}/email_tasks`, taskId);
+            const taskDocRef = doc(db, `artifacts/${appId}/organizations/${organizationId}/tasks`, taskId);
             await updateDoc(taskDocRef, {
                 status: newStatus,
                 replyTimerActive: replyTimerActive,
@@ -290,6 +292,16 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
         }
     };
 
+    // Calculate task counts for the dashboard
+    const taskCounts = {
+        new: tasks.filter(task => task.status === 'new').length,
+        awaitingReply: tasks.filter(task => task.status === 'awaitingReply' || task.status === 'overdue').length,
+        replied: tasks.filter(task => task.status === 'replied').length,
+        pendingConfirmation: tasks.filter(task => task.status === 'pendingConfirmation').length,
+        confirmedPendingCityTax: tasks.filter(task => task.status === 'confirmedPendingCityTax').length,
+        loseBookings: tasks.filter(task => task.status === 'loseBookings').length,
+    };
+
     return (
         <>
             {/* Home Header - Now includes User ID and Logout */}
@@ -301,6 +313,9 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
                         <span className="mb-2 sm:mb-0 sm:mr-4 bg-indigo-800 px-3 py-1 rounded-full text-xs font-mono shadow-inner">
                             User ID: {userId}
                         </span>
+                        <span className="mb-2 sm:mb-0 sm:mr-4 bg-indigo-800 px-3 py-1 rounded-full text-xs font-mono shadow-inner">
+                            Org ID: {organizationId}
+                        </span>
                         <button
                             onClick={handleLogout} // Use the passed handleLogout prop
                             className="bg-indigo-800 hover:bg-indigo-900 text-white text-xs px-4 py-2 rounded-full transition duration-300 ease-in-out shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transform hover:scale-105"
@@ -311,6 +326,33 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
                     </div>
                 )}
             </header>
+
+            {/* Dashboard Section */}
+            <section className="p-6 border-b border-gray-200 bg-white">
+                <h2 className="text-2xl font-bold mb-4 text-indigo-800 text-center">Task Overview</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {Object.entries(taskCounts).map(([status, count]) => (
+                        <div key={status} className={`p-4 rounded-lg shadow-md text-center
+                            ${status === 'new' ? 'bg-blue-50 border-blue-200' : ''}
+                            ${status === 'awaitingReply' ? 'bg-yellow-50 border-yellow-200' : ''}
+                            ${status === 'replied' ? 'bg-green-50 border-green-200' : ''}
+                            ${status === 'pendingConfirmation' ? 'bg-purple-50 border-purple-200' : ''}
+                            ${status === 'confirmedPendingCityTax' ? 'bg-indigo-50 border-indigo-200' : ''}
+                            ${status === 'loseBookings' ? 'bg-gray-100 border-gray-200' : ''}
+                        `}>
+                            <p className="text-sm font-semibold text-gray-600">{getTabDisplayName(status)}</p>
+                            <p className="text-3xl font-bold mt-1
+                                ${status === 'new' ? 'text-blue-700' : ''}
+                                ${status === 'awaitingReply' ? 'text-yellow-700' : ''}
+                                ${status === 'replied' ? 'text-green-700' : ''}
+                                ${status === 'pendingConfirmation' ? 'text-purple-700' : ''}
+                                ${status === 'confirmedPendingCityTax' ? 'text-indigo-700' : ''}
+                                ${status === 'loseBookings' ? 'text-gray-700' : ''}
+                            ">{count}</p>
+                        </div>
+                    ))}
+                </div>
+            </section>
 
             {/* Process New Email Section */}
             <section className="p-6 border-b border-gray-200 bg-gray-50">
@@ -530,6 +572,7 @@ function App() {
     const [db, setDb] = useState(null);
     const [auth, setAuth] = useState(null);
     const [userId, setUserId] = useState(null);
+    const [organizationId, setOrganizationId] = useState(''); // New state for organization ID
     const [isAuthReady, setIsAuthReady] = useState(false); // To ensure auth is ready before Firestore ops
 
     // Authentication form states
@@ -567,6 +610,7 @@ function App() {
                     setAuthError(''); // Clear auth error on successful login
                 } else {
                     setUserId(null); // Clear userId if logged out
+                    setOrganizationId(''); // Clear organizationId on logout
                     // Attempt to sign in anonymously if no user is logged in and an initial token is provided
                     try {
                         if (initialAuthToken) {
@@ -608,8 +652,8 @@ function App() {
         setAuthError('');
         setActionLoading(true); // Set action loading for auth
 
-        if (!email || !password) {
-            setAuthError("Email and password cannot be empty.");
+        if (!email || !password || !organizationId.trim()) { // Organization ID is now required
+            setAuthError("Email, password, and Organization ID cannot be empty.");
             setActionLoading(false);
             return;
         }
@@ -729,6 +773,21 @@ function App() {
                                     required
                                 />
                             </div>
+                            <div>
+                                <label htmlFor="organizationId" className="block text-sm font-semibold text-gray-700 mb-1">Organization ID</label>
+                                <input
+                                    type="text"
+                                    id="organizationId"
+                                    value={organizationId}
+                                    onChange={(e) => setOrganizationId(e.target.value)}
+                                    placeholder="e.g., mycompany-123"
+                                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-200 ease-in-out text-gray-800"
+                                    required
+                                />
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Use a unique ID to create a new organization, or an existing one to join.
+                                </p>
+                            </div>
                             <button
                                 type="submit"
                                 className="w-full bg-gradient-to-r from-indigo-600 to-purple-700 text-white py-3 px-4 rounded-lg font-bold text-lg hover:from-indigo-700 hover:to-purple-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition duration-300 ease-in-out shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center transform hover:scale-105"
@@ -763,6 +822,7 @@ function App() {
                         db={db}
                         userId={userId}
                         appId={appId}
+                        organizationId={organizationId} // Pass organizationId to Home
                         actionLoading={actionLoading}
                         setActionLoading={setActionLoading}
                         showMessage={showMessage}
