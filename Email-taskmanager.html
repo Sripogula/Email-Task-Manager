@@ -71,7 +71,7 @@ function Home({ db, userId, appId, actionLoading, setActionLoading, showMessage,
                 prevTasks.map(task => {
                     if (task.replyTimerActive && task.replyDueBy) {
                         const now = new Date();
-                        const timeLeftMs = task.replyDueBy.getTime() - now.getTime();
+                        const timeLeftMs = (task.replyDueBy - now).total_seconds() * 1000; // Corrected calculation
                         if (timeLeftMs <= 0) {
                             // If timer expires, update status to 'overdue' and deactivate timer
                             // This update will also be pushed to Firestore
@@ -603,28 +603,37 @@ function App() {
             setDb(firestore);
             setAuth(authentication);
 
-            // Listen for auth state changes
-            const unsubscribeAuth = onAuthStateChanged(authentication, async (user) => {
+            const attemptInitialAuth = async () => {
+                try {
+                    if (initialAuthToken) {
+                        console.log("Attempting sign-in with custom token...");
+                        await signInWithCustomToken(authentication, initialAuthToken);
+                        console.log("Signed in with custom token.");
+                    }
+                } catch (err) {
+                    console.error("Firebase Initial Auth Error (custom token failed, proceeding to manual login):", err);
+                    // No need to set global error here, as it's expected if token is invalid.
+                    // The UI will naturally show the login form if userId remains null.
+                } finally {
+                    // Ensure auth state is ready after initial attempt, regardless of success
+                    setIsAuthReady(true);
+                    setLoading(false);
+                }
+            };
+
+            // Set up the listener first
+            const unsubscribeAuth = onAuthStateChanged(authentication, (user) => {
                 if (user) {
                     setUserId(user.uid);
                     setAuthError(''); // Clear auth error on successful login
                 } else {
                     setUserId(null); // Clear userId if logged out
                     setOrganizationId(''); // Clear organizationId on logout
-                    // Attempt to sign in anonymously if no user is logged in and an initial token is provided
-                    try {
-                        if (initialAuthToken) {
-                            await signInWithCustomToken(authentication, initialAuthToken);
-                        } else {
-                            // If no initial token and no logged-in user, allow user to sign in/up
-                        }
-                    } catch (err) {
-                        console.error("Firebase Initial Auth Error:", err);
-                    }
                 }
-                setIsAuthReady(true); // Mark auth as ready regardless of login status
-                setLoading(false); // Stop general loading after auth check
             });
+
+            // Then attempt initial authentication
+            attemptInitialAuth();
 
             return () => unsubscribeAuth(); // Cleanup auth listener
         } catch (err) {
